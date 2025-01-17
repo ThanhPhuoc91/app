@@ -1,0 +1,113 @@
+name: Build IPA
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 21
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun i
+
+      - name: Emit autoimport
+        run: bun run test src/logic/noop.spec.ts
+
+      - name: Typing
+        run: bun run typing
+
+      - name: Test
+        run: bun run test
+
+  build:
+    runs-on: macos-latest
+    needs: ci
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 21
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+          cache: "gradle"
+
+      - name: Write google-services.json
+        run: |
+          echo $'${{ secrets.GOOGLE_SERVICES }}' > src-capacitor/ios/app/google-services.json
+
+      - name: Write .env
+        run: |
+          echo $'SUPABASE_URL="${{ secrets.SUPABASE_URL }}"\nSUPABASE_KEY="${{ secrets.SUPABASE_KEY }}"\nFIREBASE_CONFIG="${{ secrets.FIREBASE_CONFIG }}"\nAPI_SK="${{ secrets.API_SK }}"' > .env
+
+      - name: Install and Build Capacitor
+        run: |
+          bun i
+          bun run build:ios
+
+      - name: Prepare IPA (No Code Signing)
+        run: |
+          cd ios/App
+          xcodebuild clean archive \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath $PWD/build/App.xcarchive \
+            CODE_SIGNING_ALLOWED=NO
+
+          xcodebuild -exportArchive \
+            -archivePath $PWD/build/App.xcarchive \
+            -exportOptionsPlist ExportOptions.plist \
+            -exportPath $PWD/build \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Rename and Move IPA
+        run: mv ios/App/build/App.ipa ios/App/build/app-release.ipa
+
+      - name: Setup upterm session
+        uses: lhotari/action-upterm@v1
+        if: ${{ failure() }}
+        with:
+          wait-timeout-minutes: 5
+
+      - name: Generate changelog
+        id: changelog
+        uses: metcalfc/changelog-generator@c3f61b2a3db543ceee83c759ac8e48419a1a2211
+        with:
+          myToken: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release
+        uses: softprops/action-gh-release@v0.1.14
+        with:
+          files: ios/App/build/app-release.ipa
+          body: ${{ steps.changelog.outputs.changelog }}
